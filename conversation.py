@@ -1,14 +1,13 @@
 """
-對話狀態管理 + 訊息處理核心（Telegram 版）
+對話狀態管理 + 訊息處理核心（Telegram + Gemini 版）
 """
 
 import os
-from anthropic import Anthropic
+import google.generativeai as genai
 from app.database import get_session, save_session, get_recent_meals, log_meal
 
-anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-# ── 對話流程定義 ──────────────────────────────
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 QUICK_REPLY_MAP = {
     "ask_cook_or_eat_out": {
@@ -52,20 +51,13 @@ HELP_TEXT = """🍱 *今天吃什麼 Bot 使用說明*
   例：`記錄 滷肉飯、燙青菜`
 • `/start` 或「重來」→ 重新開始
 • `/help` → 顯示此說明
-
-*Bot 會根據以下幫你推薦：*
-疲憊程度、用餐對象、預算、近期飲食、小酌意願
 """
 
 
-# ── 主要處理函式 ──────────────────────────────
-
 def handle_message(user_id: str, text: str) -> list:
-    # 幫助指令
     if text in ["/help", "help", "說明"]:
         return [make_text(HELP_TEXT, parse_mode="Markdown")]
 
-    # 飲食記錄
     for prefix in RECORD_PREFIXES:
         if text.startswith(prefix):
             meal = text[len(prefix):].strip()
@@ -76,14 +68,12 @@ def handle_message(user_id: str, text: str) -> list:
                 )]
             return [make_text("請在「記錄」後面加上你吃的東西，例如：記錄 滷肉飯")]
 
-    # 觸發詞
     if any(text.lower() == w.lower() for w in TRIGGER_WORDS):
         save_session(user_id, {"step": "ask_cook_or_eat_out", "answers": {}})
         return [make_keyboard(**QUICK_REPLY_MAP["ask_cook_or_eat_out"])]
 
     session = get_session(user_id)
 
-    # 尚未開始
     if not session or session.get("step") in ("done", None):
         save_session(user_id, {"step": "ask_cook_or_eat_out", "answers": {}})
         return [make_keyboard(**QUICK_REPLY_MAP["ask_cook_or_eat_out"])]
@@ -99,7 +89,6 @@ def handle_message(user_id: str, text: str) -> list:
         save_session(user_id, session)
 
         if next_step == "generating":
-            # 顯示「思考中」提示
             thinking = make_text("⏳ 幫你想最適合今天的吃法，稍等一下…")
             result = generate_recommendation(user_id, answers)
             session["step"] = "done"
@@ -108,12 +97,9 @@ def handle_message(user_id: str, text: str) -> list:
 
         return [make_keyboard(**QUICK_REPLY_MAP[next_step])]
 
-    # 意外狀態，重置
     save_session(user_id, {"step": "ask_cook_or_eat_out", "answers": {}})
     return [make_keyboard(**QUICK_REPLY_MAP["ask_cook_or_eat_out"])]
 
-
-# ── AI 推薦生成 ───────────────────────────────
 
 def generate_recommendation(user_id: str, answers: dict) -> str:
     recent_meals = get_recent_meals(user_id, limit=7)
@@ -148,18 +134,11 @@ def generate_recommendation(user_id: str, answers: dict) -> str:
 
 語氣輕鬆像朋友，繁體中文，300字以內。"""
 
-    response = anthropic.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=600,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    suggestion = response.content[0].text
+    response = model.generate_content(prompt)
+    suggestion = response.text
     suggestion += "\n\n---\n💬 用完餐後記得告訴我：\n「記錄 [吃了什麼]」\n例如：記錄 滷肉飯、燙青菜"
     return suggestion
 
-
-# ── Telegram 訊息格式 helpers ─────────────────
 
 def make_text(text: str, parse_mode: str = None) -> dict:
     msg = {"text": text}
@@ -169,11 +148,6 @@ def make_text(text: str, parse_mode: str = None) -> dict:
 
 
 def make_keyboard(text: str, options: list) -> dict:
-    """
-    options 是二維陣列，例如：
-    [["選項A", "選項B"], ["選項C"]]
-    代表第一排兩個按鈕、第二排一個按鈕
-    """
     keyboard = [
         [{"text": opt} for opt in row]
         for row in options
